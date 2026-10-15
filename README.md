@@ -57,7 +57,7 @@ pip install "pctr[ocr]"       # rapidocr + pytesseract
 ## MCP server
 
 `pctr` ships a Model Context Protocol server so MCP clients (Claude Desktop,
-Cursor, opencode, ...) can drive the Windows desktop directly:
+Cursor, opencode, ...) can drive the desktop directly:
 
 ```bash
 pip install "pctr[mcp]"
@@ -248,3 +248,7 @@ pctr hid type --text "hello" --port COM5
 ## License
 
 MIT
+
+---
+
+AI-generated with [OpenCode](https://opencode.ai) — primary model: DeepSeek V4.1 Flash.
