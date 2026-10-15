@@ -2,7 +2,7 @@ import argparse
 import re
 import sys
 import time
-from typing import Any, NoReturn, cast
+from typing import NoReturn
 
 for _stream in (sys.stdout, sys.stderr):
     _reconf = getattr(_stream, "reconfigure", None)
@@ -11,11 +11,6 @@ for _stream in (sys.stdout, sys.stderr):
             _reconf(encoding="utf-8", errors="replace")
         except Exception:
             pass
-
-try:
-    from pywinauto import Desktop
-except ImportError:
-    Desktop = None
 
 DESCRIPTION = "Element-based UI Automation CLI for AI agents (Windows / Linux X11)."
 
@@ -41,27 +36,24 @@ def _compile(pattern, what, flags=re.I):
 
 
 def _backend(args):
-    return args._backend
+    """Resolve (once) and return the platform backend for this invocation."""
+    be = getattr(args, "_backend", None)
+    if be is None:
+        from pctr.backends import get_backend
+        be = get_backend(getattr(args, "backend", "auto"))
+        args._backend = be
+    return be
 
 
-def _iter_windows(args):
-    return _backend(args).list_windows()
-
-
-def _find_window(args, title_re, process=None, timeout=5.0, index=0):
-    return _backend(args).find_window(title_re, process, timeout)
-
-
-def _enum_top_windows(args):
-    return _backend(args).list_windows()
-
-
-def _find_hwnd(args, title_re, process=None, timeout=5.0):
-    return _backend(args).find_window(title_re, process, timeout)
-
-
-def _matches(args, handle, name=None, control_type=None, auto_id=None):
-    return _backend(args).find_elements(handle, name, control_type, auto_id)
+def _apply_input(args, be):
+    """Honor --input-backend / --direct by selecting the backend's input path."""
+    name = getattr(args, "input_backend", None)
+    if name is None and getattr(args, "direct", False):
+        name = "pydirectinput"
+    try:
+        be.set_input(name, getattr(args, "port", None))
+    except Exception as e:
+        _fail(str(e))
 
 
 def _describe(el):
@@ -191,13 +183,14 @@ def cmd_click(args):
     be = _backend(args)
     handle, el, n = _get_element(args)
     print("target: %s  (%d match(es))" % (_describe(el), n))
-    if args.method == "invoke":
+    if args.method in ("invoke", "auto"):
         try:
             if be.invoke_element(handle, el):
                 print("invoked")
                 return
         except Exception as e:
-            print("invoke failed (%s), falling back to mouse" % e)
+            if args.method == "invoke":
+                print("invoke failed (%s), falling back to mouse" % e)
     be.click_element(handle, el, button=args.button, dbl=args.dbl)
     print("clicked")
 
@@ -230,8 +223,9 @@ def cmd_type(args):
         except Exception as e:
             _fail("type failed: %s" % e)
     else:
-        # Global typing via input backend
-        be.send_keys(args.text)
+        # Global typing: literal text (no pywinauto key-syntax interpretation)
+        _apply_input(args, be)
+        be.write_text(args.text, interval=delay)
     print("typed")
 
 
@@ -278,80 +272,6 @@ def cmd_shot(args):
     print("saved %s (%dx%d)" % (args.out, img.width, img.height))
 
 
-class _SerialHID:
-    """Raw input via a microcontroller presenting a REAL USB HID device.
-
-    Talks newline-terminated ASCII over a serial port. Firmware protocol:
-      MOVE x y ; CLICK b ; DOWN b ; UP b ; KEY k DOWN|UP ; WRITE text ; HOTKEY a+b
-    Port from --port or the PCTR_SERIAL_PORT env var.
-    """
-
-    def __init__(self, port=None, baud=115200):
-        try:
-            import serial
-        except Exception as e:
-            raise RuntimeError('serial-hid needs pyserial: pip install "pctr[serial]" (%s)' % e)
-        port = port or __import__("os").environ.get("PCTR_SERIAL_PORT")
-        if not port:
-            raise RuntimeError("serial-hid needs a port: pass --port COMx or set PCTR_SERIAL_PORT")
-        self._ser = serial.Serial(port, baud, timeout=1)
-
-    def _send(self, line):
-        self._ser.write((line + "\n").encode("utf-8"))
-
-    def moveTo(self, x, y, duration=0.0):
-        self._send("MOVE %d %d" % (int(x), int(y)))
-
-    def mouseDown(self, button="left"):
-        self._send("DOWN %s" % button)
-
-    def mouseUp(self, button="left"):
-        self._send("UP %s" % button)
-
-    def click(self, button="left"):
-        self._send("CLICK %s" % button)
-
-    def keyDown(self, key):
-        self._send("KEY %s DOWN" % key)
-
-    def keyUp(self, key):
-        self._send("KEY %s UP" % key)
-
-    def write(self, text, interval=0.0):
-        self._send("WRITE %s" % text.replace("\r", "").replace("\n", "\\n"))
-
-    def hotkey(self, *keys):
-        self._send("HOTKEY %s" % "+".join(keys))
-
-
-def _resolve_input_backend(name, port=None):
-    name = (name or "auto").lower()
-    if name in ("", "auto", "pyautogui", "sendinput"):
-        import pyautogui
-        pyautogui.FAILSAFE = False
-        pyautogui.PAUSE = 0.01
-        return pyautogui
-    if name in ("pydirectinput", "direct"):
-        import pydirectinput
-        pydirectinput.FAILSAFE = False
-        try:
-            pydirectinput.PAUSE = 0.01
-        except Exception:
-            pass
-        return pydirectinput
-    if name in ("serial", "serial-hid", "hid"):
-        return _SerialHID(port)
-    raise RuntimeError("unknown backend %r (pyautogui | pydirectinput | serial-hid)" % name)
-
-
-def _mouse_backend(args):
-    name = getattr(args, "backend", None) or ("pydirectinput" if getattr(args, "direct", False) else "auto")
-    try:
-        return _resolve_input_backend(name, getattr(args, "port", None))
-    except RuntimeError as e:
-        _fail(str(e))
-
-
 def _parse_pair(text):
     try:
         x, y = text.split(",")
@@ -362,24 +282,28 @@ def _parse_pair(text):
 
 def cmd_move(args):
     be = _backend(args)
+    _apply_input(args, be)
     be.move_mouse(args.x, args.y, duration=getattr(args, "duration", 0.0))
     print("moved to %d,%d" % (args.x, args.y))
 
 
 def cmd_down(args):
     be = _backend(args)
+    _apply_input(args, be)
     be.mouse_down(button=args.button)
     print("mouse down (%s)" % args.button)
 
 
 def cmd_up(args):
     be = _backend(args)
+    _apply_input(args, be)
     be.mouse_up(button=args.button)
     print("mouse up (%s)" % args.button)
 
 
 def cmd_hold(args):
     be = _backend(args)
+    _apply_input(args, be)
     if args.x is not None and args.y is not None:
         be.move_mouse(args.x, args.y, duration=0.0)
     be.mouse_down(button=args.button)
@@ -391,18 +315,21 @@ def cmd_hold(args):
 
 def cmd_keydown(args):
     be = _backend(args)
+    _apply_input(args, be)
     be.key_down(args.key)
     print("key down: %s" % args.key)
 
 
 def cmd_keyup(args):
     be = _backend(args)
+    _apply_input(args, be)
     be.key_up(args.key)
     print("key up: %s" % args.key)
 
 
 def cmd_keyhold(args):
     be = _backend(args)
+    _apply_input(args, be)
     be.key_down(args.key)
     print("holding key %s for %dms..." % (args.key, args.ms))
     time.sleep(args.ms / 1000.0)
@@ -412,11 +339,12 @@ def cmd_keyhold(args):
 
 def cmd_hotkey(args):
     be = _backend(args)
+    _apply_input(args, be)
     keys = [k.strip() for k in args.keys.split("+") if k.strip()]
-    if isinstance(be._input, X11Input):
-        be._input.hotkey(*keys)
-    else:
-        be._input.hotkey(*keys)
+    for k in keys:
+        be.key_down(k)
+    for k in reversed(keys):
+        be.key_up(k)
     print("hotkey: %s" % "+".join(keys))
 
 
@@ -424,72 +352,6 @@ def cmd_size(args):
     be = _backend(args)
     w, h = be.screen_size()
     print("%dx%d" % (w, h))
-
-
-def _vdm() -> Any:
-    from ctypes import POINTER
-    from ctypes.wintypes import BOOL, HWND
-    import comtypes
-    from comtypes import COMMETHOD, GUID, HRESULT, IUnknown
-
-    class IVirtualDesktopManager(IUnknown):
-        _iid_ = GUID("{A5CD92FF-29BE-454C-8D04-D82879FB3F1B}")
-        _methods_ = [
-            COMMETHOD([], HRESULT, "IsWindowOnCurrentVirtualDesktop",
-                      (["in"], HWND, "w"), (["out"], POINTER(BOOL), "on")),
-            COMMETHOD([], HRESULT, "GetWindowDesktopId",
-                      (["in"], HWND, "w"), (["out"], POINTER(GUID), "did")),
-            COMMETHOD([], HRESULT, "MoveWindowToDesktop",
-                      (["in"], HWND, "w"), (["in"], POINTER(GUID), "did")),
-        ]
-
-    return cast(Any, comtypes.CoCreateInstance(
-        GUID("{AA509086-5CA9-4C25-8F95-589D3C07B48A}"),
-        interface=IVirtualDesktopManager,
-    ))
-
-
-def _guid_norm(g):
-    return str(g).strip("{}").lower()
-
-
-def _vdesk_guids():
-    """Ordered desktop GUIDs from the shell's registry (no undocumented COM)."""
-    import uuid
-    import winreg
-    k = winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER,
-        r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops",
-    )
-    try:
-        raw = winreg.QueryValueEx(k, "VirtualDesktopIDs")[0]
-    finally:
-        winreg.CloseKey(k)
-    return [_guid_norm(uuid.UUID(bytes_le=raw[i:i + 16])) for i in range(0, len(raw) - 15, 16)]
-
-
-def _list_windows_with_desktop():
-    import ctypes
-    from ctypes import wintypes
-    vdm: Any = _vdm()
-    user32 = ctypes.windll.user32
-    out = []
-    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-    def cb(hwnd, lp):
-        n = user32.GetWindowTextLengthW(hwnd)
-        if n and user32.IsWindowVisible(hwnd):
-            buf = ctypes.create_unicode_buffer(n + 1)
-            user32.GetWindowTextW(hwnd, buf, n + 1)
-            try:
-                d = _guid_norm(vdm.GetWindowDesktopId(wintypes.HWND(hwnd)))
-            except Exception:
-                d = ""
-            out.append((hwnd, buf.value, d))
-        return True
-
-    user32.EnumWindows(proc(cb), 0)
-    return out
 
 
 def _desktop_list(args, be):
@@ -568,12 +430,14 @@ def cmd_desktop(args):
         return _desktop_where(args, be, bool_only=False)
     if action == "move-window":
         return _desktop_move(args, be)
+    _apply_input(args, be)
     be.switch_desktop(action)
     print("desktop: %s" % action)
 
 
 def cmd_drag(args):
     be = _backend(args)
+    _apply_input(args, be)
     x1, y1 = _parse_pair(args.start)
     x2, y2 = _parse_pair(args.end)
     be.move_mouse(x1, y1, duration=0.0)
@@ -583,78 +447,12 @@ def cmd_drag(args):
     print("dragged %d,%d -> %d,%d" % (x1, y1, x2, y2))
 
 
-_OCR_PS = r'''
-param([string]$Path)
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
-function Await($op, $type) {
-  $m = $asTaskGeneric.MakeGenericMethod($type)
-  $t = $m.Invoke($null, @($op))
-  $t.Wait(-1) | Out-Null
-  $t.Result
-}
-$null = [Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]
-$null = [Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]
-$null = [Windows.Graphics.Imaging.BitmapDecoder,Windows.Foundation,ContentType=WindowsRuntime]
-$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])
-$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
-$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-$bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-$engine = $null
-$lang = $env:PCTR_OCR_LANG
-if ($lang) {
-  $null = [Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime]
-  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage((New-Object Windows.Globalization.Language $lang))
-  if (-not $engine) { Write-Error ("OCR language not available on this system: " + $lang); exit 2 }
-} else {
-  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-  if (-not $engine) {
-    $null = [Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime]
-    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage((New-Object Windows.Globalization.Language 'en-US'))
-  }
-  if (-not $engine) { Write-Error 'no OCR engine available'; exit 2 }
-}
-$res = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-$out = foreach ($line in $res.Lines) { foreach ($w in $line.Words) { [pscustomobject]@{ text = $w.Text; x = [int]$w.BoundingRect.X; y = [int]$w.BoundingRect.Y; w = [int]$w.BoundingRect.Width; h = [int]$w.BoundingRect.Height } } }
-ConvertTo-Json -Compress -InputObject @($out)
-'''
-
-
 def _pctr_tempdir():
     import os
     import tempfile
     d = os.path.join(tempfile.gettempdir(), "pctr")
     os.makedirs(d, exist_ok=True)
     return d
-
-
-def _windows_ocr(image_path, lang=None):
-    import base64
-    import json
-    import os
-    import subprocess
-    body = _OCR_PS.strip()
-    if body.startswith("param"):  # drop the param() line; path comes via env
-        body = body.split("\n", 1)[1]
-    ps = "$Path = $env:PCTR_OCR_PATH\n" + body
-    enc = base64.b64encode(ps.encode("utf-16-le")).decode("ascii")
-    env = dict(os.environ)
-    env["PCTR_OCR_PATH"] = image_path
-    if lang:
-        env["PCTR_OCR_LANG"] = lang
-    else:
-        env.pop("PCTR_OCR_LANG", None)
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
-        capture_output=True, text=True, env=env,
-    )
-    txt = (out.stdout or "").strip()
-    if not txt:
-        raise SystemExit("OCR failed: " + (out.stderr or "").strip()[:400])
-    data = json.loads(txt, strict=False)
-    if isinstance(data, dict):
-        data = [data]
-    return [w for w in data if w and w.get("text")]
 
 
 def _ocr_capture(args):
@@ -1175,7 +973,6 @@ def _run_file(path, json_default=False):
         if json_default and not getattr(a, "json_out", False):
             a.json_out = True
         print("pctr> %s" % line, file=sys.stderr)
-        _resolve_backend(a)
         _validate(a)
         a.func(a)
         ran += 1
@@ -1476,20 +1273,6 @@ def build_parser():
     return ap
 
 
-def _resolve_backend(args):
-    """Resolve the platform backend and stash it on args."""
-    from pctr.backends import get_backend
-    name = getattr(args, "backend", "auto")
-    try:
-        backend = get_backend(name)
-    except SystemExit:
-        raise
-    except Exception as e:
-        _fail("backend %r unavailable: %s" % (name, e))
-    args._backend = backend
-    return backend
-
-
 def main():
     ap = build_parser()
     args = ap.parse_args()
@@ -1505,7 +1288,6 @@ def main():
     if not getattr(args, "cmd", None):
         ap.print_help()
         return
-    _resolve_backend(args)
     _validate(args)
     try:
         args.func(args)

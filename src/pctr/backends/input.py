@@ -31,6 +31,49 @@ class InputBackend(ABC):
     def hotkey(self, *keys: str) -> None: ...
 
 
+class SerialHID(InputBackend):
+    """Raw input via a microcontroller presenting a REAL USB HID device.
+
+    Talks newline-terminated ASCII over a serial port. Firmware protocol:
+      MOVE x y ; CLICK b ; DOWN b ; UP b ; KEY k DOWN|UP ; WRITE text ; HOTKEY a+b
+    Port from --port or the PCTR_SERIAL_PORT env var.
+    """
+
+    def __init__(self, port=None, baud=115200):
+        try:
+            import serial
+        except Exception as e:
+            raise RuntimeError('serial-hid needs pyserial: pip install "pctr[serial]" (%s)' % e)
+        port = port or __import__("os").environ.get("PCTR_SERIAL_PORT")
+        if not port:
+            raise RuntimeError("serial-hid needs a port: pass --port /dev/ttyUSB0 or set PCTR_SERIAL_PORT")
+        self._ser = serial.Serial(port, baud, timeout=1)
+
+    def _send(self, line):
+        self._ser.write((line + "\n").encode("utf-8"))
+
+    def move_to(self, x, y, duration=0.0):
+        self._send("MOVE %d %d" % (int(x), int(y)))
+
+    def mouse_down(self, button="left"):
+        self._send("DOWN %s" % button)
+
+    def mouse_up(self, button="left"):
+        self._send("UP %s" % button)
+
+    def key_down(self, key):
+        self._send("KEY %s DOWN" % key)
+
+    def key_up(self, key):
+        self._send("KEY %s UP" % key)
+
+    def write(self, text, interval=0.0):
+        self._send("WRITE %s" % text.replace("\r", "").replace("\n", "\\n"))
+
+    def hotkey(self, *keys):
+        self._send("HOTKEY %s" % "+".join(keys))
+
+
 class WindowsInput(InputBackend):
     """Windows input via pyautogui / pydirectinput."""
 
@@ -168,6 +211,37 @@ class X11Input(InputBackend):
             self._xtest.fake_input(self._display, self._X.KeyRelease, kc)
             self._display.sync()
 
+    _SHIFT_MAP = {
+        "!": "1", "@": "2", "#": "3", "$": "4", "%": "5", "^": "6",
+        "&": "7", "*": "8", "(": "9", ")": "0", "_": "-", "+": "=",
+        "{": "[", "}": "]", "|": "\\", ":": ";", '"': "'", "<": ",",
+        ">": ".", "?": "/", "~": "`",
+    }
+
+    def _tap(self, ch: str) -> None:
+        """Press+release one character, synthesizing Shift when needed."""
+        shift = False
+        key = ch
+        if ch.isalpha() and ch.isupper():
+            shift = True
+            key = ch.lower()
+        elif ch in self._SHIFT_MAP:
+            shift = True
+            key = self._SHIFT_MAP[ch]
+        keysym = self._XK.string_to_keysym(key)
+        if not keysym:
+            return
+        kc = self._keycode(keysym)
+        if not kc:
+            return
+        if shift:
+            self._xtest.fake_input(self._display, self._X.KeyPress, self._keycode(self._XK.string_to_keysym("Shift_L")))
+        self._xtest.fake_input(self._display, self._X.KeyPress, kc)
+        self._xtest.fake_input(self._display, self._X.KeyRelease, kc)
+        if shift:
+            self._xtest.fake_input(self._display, self._X.KeyRelease, self._keycode(self._XK.string_to_keysym("Shift_L")))
+        self._display.sync()
+
     def write(self, text: str, interval: float = 0.0) -> None:
         for ch in text:
             if ch == "\n":
@@ -177,13 +251,7 @@ class X11Input(InputBackend):
                 self.key_down("tab")
                 self.key_up("tab")
             else:
-                keysym = self._XK.string_to_keysym(ch)
-                if keysym:
-                    kc = self._keycode(keysym)
-                    if kc:
-                        self._xtest.fake_input(self._display, self._X.KeyPress, kc)
-                        self._xtest.fake_input(self._display, self._X.KeyRelease, kc)
-                        self._display.sync()
+                self._tap(ch)
             if interval > 0:
                 time.sleep(interval)
 

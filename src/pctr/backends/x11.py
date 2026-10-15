@@ -4,133 +4,15 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import time
-from typing import Any
 
-from .base import Backend, WindowInfo, ElementInfo, OCRWord
+from .base import Backend, WindowInfo, ElementInfo
 from .input import X11Input
 from .ocr import RapidOCRBackend, TesseractOCR
 from .atspi import AtspiClient
 
 
 # --- AT-SPI2 role -> UIA control-type mapping ----------------------------------
-
-_ROLE_MAP = {
-    "PUSH_BUTTON": "Button",
-    "TOGGLE_BUTTON": "CheckBox",
-    "CHECK_BOX": "CheckBox",
-    "RADIO_BUTTON": "RadioButton",
-    "TEXT": "Edit",
-    "ENTRY": "Edit",
-    "PASSWORD_TEXT": "Edit",
-    "COMBO_BOX": "ComboBox",
-    "MENU": "Menu",
-    "MENU_ITEM": "MenuItem",
-    "MENU_BAR": "MenuBar",
-    "TOOL_TIP": "ToolTip",
-    "LABEL": "Text",
-    "STATIC": "Text",
-    "PANEL": "Pane",
-    "FRAME": "Pane",
-    "DIALOG": "Pane",
-    "WINDOW": "Pane",
-    "TABLE": "DataGrid",
-    "TABLE_CELL": "DataItem",
-    "LIST": "List",
-    "LIST_ITEM": "ListItem",
-    "SCROLL_BAR": "ScrollBar",
-    "SLIDER": "Slider",
-    "PROGRESS_BAR": "ProgressBar",
-    "TOOL_BAR": "ToolBar",
-    "TAB": "TabItem",
-    "TAB_LIST": "Tab",
-    "PAGE_TAB": "TabItem",
-    "TREE": "Tree",
-    "TREE_ITEM": "TreeItem",
-    "SEPARATOR": "Separator",
-    "SPLITTER": "Separator",
-    "LINK": "Hyperlink",
-    "IMAGE": "Image",
-    "ICON": "Image",
-    "HEADER": "Header",
-    "FOOTER": "Footer",
-    "STATUS_BAR": "StatusBar",
-    "CALENDAR": "Calendar",
-    "DATE_PICKER": "Calendar",
-    "SPIN_BUTTON": "Spinner",
-    "PAGE": "Pane",
-    "DOCUMENT": "Pane",
-    "UNKNOWN": "Unknown",
-    "REDUNDANT_OBJECT": "Unknown",
-    "FILLER": "Pane",
-    "CANVAS": "Pane",
-    "CHOICE": "ComboBox",
-    "LIST_BOX": "List",
-    "MENU_SECTION": "Menu",
-    "MENU_ITEM_2": "MenuItem",
-    "CHECK_MENU_ITEM": "MenuItem",
-    "RADIO_MENU_ITEM": "MenuItem",
-    "TEAROFF_MENU_ITEM": "MenuItem",
-    "LEVEL_BAR": "ProgressBar",
-    "TITLE_BAR": "Pane",
-    "APPLICATION": "Pane",
-    "ACCELERATOR_LABEL": "Text",
-    "ALERT": "Pane",
-    "ANIMATION": "Pane",
-    "ARROW": "Pane",
-    "BLOCK_QUOTE": "Text",
-    "CAPTION": "Text",
-    "CHART": "Pane",
-    "CHECK_MENU": "Menu",
-    "COLOR_CHOOSER": "Pane",
-    "COLUMN_HEADER": "Header",
-    "DATE_EDITOR": "Edit",
-    "DESKTOP_ICON": "Image",
-    "DESKTOP_FRAME": "Pane",
-    "DIALOG_FRAME": "Pane",
-    "DIRECTORY_PANE": "Pane",
-    "EDITBAR": "Edit",
-    "EMBEDDED": "Pane",
-    "FILE_CHOOSER": "Pane",
-    "FONT_CHOOSER": "Pane",
-    "FOOTNOTE": "Text",
-    "GLASS_FRAME": "Pane",
-    "GROUPING": "Pane",
-    "HEADER_PANE": "Header",
-    "HEADING": "Text",
-    "HTML_CONTAINER": "Pane",
-    "INFO_BAR": "StatusBar",
-    "INTERNAL_FRAME": "Pane",
-    "KEY": "Pane",
-    "LIST_BOX_2": "List",
-    "LOG": "Text",
-    "MARK": "Text",
-    "MARQUEE": "Text",
-    "MATH": "Text",
-    "METER": "ProgressBar",
-    "NOTEBOOK": "Tab",
-    "OPTION_PANE": "Pane",
-    "PARAGRAPH": "Text",
-    "POPUP_MENU": "Menu",
-    "PROGRESS": "ProgressBar",
-    "QUOTE": "Text",
-    "ROW_HEADER": "Header",
-    "RULER": "Pane",
-    "SCROLL_PANE": "Pane",
-    "SIDE_PANE": "Pane",
-    "SIZE_GRIP": "Thumb",
-    "SPINNER": "Spinner",
-    "SPLIT_PANE": "Pane",
-    "STATUS": "StatusBar",
-    "TABLE_COLUMN_HEADER": "Header",
-    "TABLE_ROW": "ListItem",
-    "TERMINAL": "Edit",
-    "TOOL_TIP_2": "ToolTip",
-    "TREE_TABLE": "Tree",
-    "VIEWPORT": "Pane",
-    "WEBPANE": "Pane",
-}
 
 
 def _fail(msg, code=2):
@@ -286,8 +168,14 @@ class X11Backend(Backend):
         win = self._display.create_resource_object("window", handle)
         try:
             geom = win.get_geometry()
-            # Account for border
-            return (geom.x, geom.y, geom.x + geom.width, geom.y + geom.height)
+            # get_geometry() is parent-relative under a reparenting WM; translate
+            # the window origin to root coordinates so screenshots/clicks line up.
+            try:
+                coords = win.translate_coords(self._root, 0, 0)
+                x, y = int(coords.x), int(coords.y)
+            except Exception:
+                x, y = int(geom.x), int(geom.y)
+            return (x, y, x + geom.width, y + geom.height)
         except Exception:
             raise SystemExit("cannot get geometry for window 0x%x" % handle)
 
@@ -377,9 +265,7 @@ class X11Backend(Backend):
         self._input.write(text, interval=0.01)
 
     def type_element_text(self, handle, el, text, delay=0.0):
-        ref = self._reopen_atspi(handle, el)
-        if ref and self._atspi_client.set_text(ref, text):
-            return
+        # Focus the element, then APPEND literal text (do not replace).
         l, t, r, b = el.rect
         self._input.move_to((l + r) // 2, (t + b) // 2)
         self._input.mouse_down("left")
@@ -388,6 +274,18 @@ class X11Backend(Backend):
         self._input.write(text, interval=delay)
 
     # --- Input (global) ---
+
+    def set_input(self, name=None, port=None):
+        from .input import X11Input, SerialHID
+        n = (name or "auto").lower()
+        if n in ("serial", "serial-hid", "hid"):
+            self._input = SerialHID(port)
+        else:
+            # pyautogui/pydirectinput are Windows-only; everything else is XTest
+            self._input = X11Input()
+
+    def write_text(self, text, interval=0.0):
+        self._input.write(text, interval=interval)
 
     def move_mouse(self, x, y, duration=0.0):
         self._input.move_to(x, y, duration=duration)
@@ -406,7 +304,6 @@ class X11Backend(Backend):
 
     def send_keys(self, keys):
         """Parse {ENTER}, ^s, +shift, %alt syntax -> XTest key sequence."""
-        import shlex
         # Tokenize: handle {KEY}, ^ctrl, +shift, %alt, literal text
         i = 0
         while i < len(keys):
@@ -491,7 +388,6 @@ class X11Backend(Backend):
 
     def _wayland_screenshot(self):
         """Full-screen capture via the compositor (Wayland), returns PIL.Image or None."""
-        import os
         import tempfile
         import time as _time
         from PIL import Image
@@ -544,7 +440,10 @@ class X11Backend(Backend):
 
     def _get_ocr(self):
         if self._ocr_engine is None:
+            # RapidOCRBackend imports lazily, so probe the import here to decide
+            # which engine actually works.
             try:
+                import rapidocr_onnxruntime  # noqa: F401
                 self._ocr_engine = RapidOCRBackend()
             except Exception:
                 self._ocr_engine = TesseractOCR()

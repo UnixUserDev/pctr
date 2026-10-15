@@ -55,3 +55,29 @@ def test_role_map_is_lowercase_keys():
         assert k == k.lower()
     assert _normalize_role("Push_Button") == "push button"
     assert ROLE_MAP["push button"] == "Button"
+
+
+def test_get_extents_unwraps_struct(monkeypatch):
+    """GetExtents comes back wrapped: body == [[x, y, w, h]] -> (x, y, x+w, y+h)."""
+    import asyncio
+    from pctr.backends import atspi
+
+    async def fake_call(abus, ref, iface, member, signature="", body=None):
+        assert member == "GetExtents"
+        return [[10, 20, 30, 40]]
+
+    monkeypatch.setattr(atspi, "_call", fake_call)
+    ext = asyncio.run(atspi._get_extents(None, ("bus", "/obj")))
+    assert ext == (10, 20, 40, 60)
+
+
+def test_get_extents_swallows_errors(monkeypatch):
+    import asyncio
+    from pctr.backends import atspi
+
+    async def boom(*a, **k):
+        raise RuntimeError("no component")
+
+    monkeypatch.setattr(atspi, "_call", boom)
+    assert asyncio.run(atspi._get_extents(None, ("bus", "/obj"))) == (0, 0, 0, 0)
+

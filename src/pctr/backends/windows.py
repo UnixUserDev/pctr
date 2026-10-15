@@ -35,17 +35,53 @@ class WindowsBackend(Backend):
         from pywinauto import Desktop
         self._Desktop = Desktop
         self._ocr = WindowsOCR()
+        self._inp = None  # selected low-level input (lazy)
+
+    # --- input selection ---
+
+    def _get_input(self):
+        if self._inp is None:
+            from .input import WindowsInput
+            self._inp = WindowsInput("auto", None)
+        return self._inp
+
+    def set_input(self, name=None, port=None):
+        from .input import WindowsInput, SerialHID
+        n = (name or "auto").lower()
+        if n in ("serial", "serial-hid", "hid"):
+            self._inp = SerialHID(port)
+        elif n in ("pydirectinput", "direct"):
+            self._inp = WindowsInput("pydirectinput", port)
+        else:
+            self._inp = WindowsInput(n or "auto", port)
 
     # --- Window management ---
 
     def list_windows(self, filter_re=None, process=None):
+        try:
+            guids = self._vdesk_guids()
+        except Exception:
+            guids = []
+        vdm = None
+        if guids:
+            try:
+                vdm = self._vdm()
+            except Exception:
+                vdm = None
         rows = []
         for hwnd, title, pid in self._enum_top_windows():
             if filter_re and filter_re.search(title) is None:
                 continue
             if process is not None and pid != process:
                 continue
-            rows.append(WindowInfo(handle=hwnd, title=title, pid=pid))
+            desktop = 0
+            if vdm is not None:
+                try:
+                    d = self._guid_norm(vdm.GetWindowDesktopId(wintypes.HWND(int(hwnd))))
+                    desktop = guids.index(d) if d in guids else -1
+                except Exception:
+                    desktop = -1
+            rows.append(WindowInfo(handle=hwnd, title=title, pid=pid, desktop=desktop))
         return rows
 
     def find_window(self, title_re, process=None, timeout=5.0):
@@ -185,37 +221,43 @@ class WindowsBackend(Backend):
         raise SystemExit("element not found for set")
 
     def type_element_text(self, handle, el, text, delay=0.0):
-        # Element-level typing uses pywinauto's type_keys via set path
-        self.set_element_text(handle, el, text)
+        # Append text using pywinauto's type_keys (does NOT replace the field).
+        win = self._Desktop(backend="uia").window(handle=handle)
+        for e in win.descendants():
+            try:
+                info = e.element_info
+            except Exception:
+                continue
+            r = info.rectangle
+            if (r.left, r.top, r.right, r.bottom) == el.rect and (info.name or "") == el.name:
+                e.click_input()
+                e.type_keys(text, with_spaces=True, with_newlines=True)
+                return
+        raise SystemExit("element not found for type")
 
     # --- Input (global) ---
 
-    def _input_backend(self, name=None, port=None):
-        return WindowsInput(name or "auto", port)
-
     def move_mouse(self, x, y, duration=0.0):
-        m = self._input_backend()
-        m.move_to(x, y, duration=duration)
+        self._get_input().move_to(x, y, duration=duration)
 
     def mouse_down(self, button="left"):
-        m = self._input_backend()
-        m.mouse_down(button=button)
+        self._get_input().mouse_down(button=button)
 
     def mouse_up(self, button="left"):
-        m = self._input_backend()
-        m.mouse_up(button=button)
+        self._get_input().mouse_up(button=button)
 
     def key_down(self, key):
-        m = self._input_backend()
-        m.key_down(key)
+        self._get_input().key_down(key)
 
     def key_up(self, key):
-        m = self._input_backend()
-        m.key_up(key)
+        self._get_input().key_up(key)
 
     def send_keys(self, keys):
         from pywinauto.keyboard import send_keys
         send_keys(keys, with_spaces=True)
+
+    def write_text(self, text, interval=0.0):
+        self._get_input().write(text, interval=interval)
 
     # --- Screen ---
 
@@ -300,9 +342,7 @@ class WindowsBackend(Backend):
             "close": ("win", "ctrl", "f4"),
         }
         combo = combos[action]
-        import pyautogui
-        pyautogui.FAILSAFE = False
-        pyautogui.hotkey(*combo)
+        self._get_input().hotkey(*combo)
 
     # --- Internal helpers (moved from cli.py) ---
 

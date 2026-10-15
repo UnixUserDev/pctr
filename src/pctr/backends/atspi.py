@@ -66,6 +66,17 @@ def _normalize_role(role: str) -> str:
     return (role or "").strip().lower().replace("_", " ")
 
 
+async def _close(bus):
+    if bus is None:
+        return
+    try:
+        r = bus.disconnect()
+        if asyncio.iscoroutine(r):
+            await r
+    except Exception:
+        pass
+
+
 async def _open():
     """Connect to the session bus and the accessibility bus."""
     from dbus_next.aio import MessageBus
@@ -139,8 +150,10 @@ async def _get_children(abus, ref) -> list[tuple[str, str]]:
 async def _get_extents(abus, ref) -> tuple[int, int, int, int]:
     try:
         body = await _call(abus, ref, "org.a11y.atspi.Component", "GetExtents", "u", [0])
-        x, y, w, h = (int(body[0]), int(body[1]), int(body[2]), int(body[3]))
-        return (x, y, x + w, y + h)
+        # GetExtents returns one struct (iiii); dbus-next hands it back
+        # wrapped: body == [[x, y, w, h]].
+        x, y, w, h = body[0]
+        return (int(x), int(y), int(x) + int(w), int(y) + int(h))
     except Exception:
         return (0, 0, 0, 0)
 
@@ -227,10 +240,14 @@ class AtspiClient:
 
         async def _go():
             bus, abus = await _open()
-            out = []
-            for app in await _get_children(abus, _DESKTOP_REF):
-                out.append((await _get_name(abus, app), app[0], app[1]))
-            return out
+            try:
+                out = []
+                for app in await _get_children(abus, _DESKTOP_REF):
+                    out.append((await _get_name(abus, app), app[0], app[1]))
+                return out
+            finally:
+                await _close(abus)
+                await _close(bus)
 
         return asyncio.run(_go())
 
@@ -239,12 +256,16 @@ class AtspiClient:
 
         async def _go():
             bus, abus = await _open()
-            ref = await _find_window_ref(abus, title)
-            if ref is None:
-                return []
-            rows: list[ElementInfo] = []
-            await _walk(abus, ref, rows, 1, max_depth, limit)
-            return rows
+            try:
+                ref = await _find_window_ref(abus, title)
+                if ref is None:
+                    return []
+                rows: list[ElementInfo] = []
+                await _walk(abus, ref, rows, 1, max_depth, limit)
+                return rows
+            finally:
+                await _close(abus)
+                await _close(bus)
 
         try:
             return asyncio.run(_go())
@@ -254,11 +275,15 @@ class AtspiClient:
     def invoke(self, ref: tuple[str, str]) -> bool:
         async def _go():
             bus, abus = await _open()
-            actions = await _get_actions(abus, ref)
-            if not actions:
-                return False
-            await _call(abus, ref, "org.a11y.atspi.Action", "DoAction", "i", [0])
-            return True
+            try:
+                actions = await _get_actions(abus, ref)
+                if not actions:
+                    return False
+                await _call(abus, ref, "org.a11y.atspi.Action", "DoAction", "i", [0])
+                return True
+            finally:
+                await _close(abus)
+                await _close(bus)
 
         try:
             return asyncio.run(_go())
@@ -268,8 +293,12 @@ class AtspiClient:
     def set_text(self, ref: tuple[str, str], text: str) -> bool:
         async def _go():
             bus, abus = await _open()
-            await _call(abus, ref, "org.a11y.atspi.EditableText", "SetTextContents", "s", [text])
-            return True
+            try:
+                await _call(abus, ref, "org.a11y.atspi.EditableText", "SetTextContents", "s", [text])
+                return True
+            finally:
+                await _close(abus)
+                await _close(bus)
 
         try:
             return asyncio.run(_go())
@@ -279,10 +308,14 @@ class AtspiClient:
     def get_text(self, ref: tuple[str, str]) -> str:
         async def _go():
             bus, abus = await _open()
-            body = await _call(abus, ref, "org.freedesktop.DBus.Properties", "Get",
-                               "ss", ["org.a11y.atspi.Text", "Text"])
-            v = body[0]
-            return str(v.value) if hasattr(v, "value") else str(v)
+            try:
+                body = await _call(abus, ref, "org.freedesktop.DBus.Properties", "Get",
+                                   "ss", ["org.a11y.atspi.Text", "Text"])
+                v = body[0]
+                return str(v.value) if hasattr(v, "value") else str(v)
+            finally:
+                await _close(abus)
+                await _close(bus)
 
         try:
             return asyncio.run(_go())

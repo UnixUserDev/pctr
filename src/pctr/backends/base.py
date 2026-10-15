@@ -106,6 +106,18 @@ class Backend(ABC):
     @abstractmethod
     def send_keys(self, keys: str) -> None: ...
 
+    def set_input(self, name: str | None = None, port: str | None = None) -> None:
+        """Select the low-level input backend (pyautogui/pydirectinput/serial-hid).
+
+        Backends that only have one input path may ignore this.
+        """
+        return None
+
+    def write_text(self, text: str, interval: float = 0.0) -> None:
+        """Type literal text globally (no pywinauto key-syntax interpretation)."""
+        key = "".join(text)
+        self.send_keys(key)
+
     # --- Screen ---
     @abstractmethod
     def screen_size(self) -> tuple[int, int]: ...
