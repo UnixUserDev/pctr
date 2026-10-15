@@ -9,7 +9,7 @@ description = "PCTR - Personal Computer Tactile Response. Element-based UI Autom
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "NTUserDev" }]
+authors = [{ name = "UnixUserDev" }]
 keywords = ["automation", "linux", "windows", "uia", "atspi", "x11", "desktop", "agent", "computer-use", "rpa"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -57,9 +57,9 @@ pctr = "pctr.cli:main"
 pctr-mcp = "pctr.mcp_server:main"
 
 [project.urls]
-Homepage = "https://github.com/NTUserDev/pctr"
-Repository = "https://github.com/NTUserDev/pctr"
-Issues = "https://github.com/NTUserDev/pctr/issues"
+Homepage = "https://github.com/UnixUserDev/pctr"
+Repository = "https://github.com/UnixUserDev/pctr"
+Issues = "https://github.com/UnixUserDev/pctr/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
