@@ -4,40 +4,53 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pctr"
-version = "0.4.0"
-description = "PCTR - Personal Computer Tactile Response. Element-based Windows UI Automation CLI for AI agents. Find controls by name/type/id and click, type, hold, drag, and screenshot - no pixel coordinates."
+version = "0.5.0"
+description = "PCTR - Personal Computer Tactile Response. Element-based UI Automation CLI for AI agents. Windows (UIA) and Linux X11 (AT-SPI2)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "NTUserDev" }]
-keywords = ["automation", "windows", "uia", "pywinauto", "desktop", "agent", "computer-use", "rpa"]
+keywords = ["automation", "linux", "windows", "uia", "atspi", "x11", "desktop", "agent", "computer-use", "rpa"]
 classifiers = [
-  "Development Status :: 4 - Beta",
-  "Environment :: Win32 (MS Windows)",
-  "Intended Audience :: Developers",
-  "Operating System :: Microsoft :: Windows",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Programming Language :: Python :: 3.13",
-  "Topic :: Software Development :: Testing",
-  "Topic :: System :: Networking",
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Networking",
 ]
 dependencies = [
-  "pywinauto>=0.6.8; platform_system == 'Windows'",
-  "uiautomation>=2.0; platform_system == 'Windows'",
-  "pyautogui>=0.9.54; platform_system == 'Windows'",
-  "pydirectinput>=1.0.4; platform_system == 'Windows'",
-  "pillow>=9.0; platform_system == 'Windows'",
+    "mss>=9.0",
+    "pillow>=9.0",
 ]
 
 [project.optional-dependencies]
+windows = [
+    "pywinauto>=0.6.8; platform_system == 'Windows'",
+    "uiautomation>=2.0; platform_system == 'Windows'",
+    "pyautogui>=0.9.54; platform_system == 'Windows'",
+    "pydirectinput>=1.0.4; platform_system == 'Windows'",
+]
+linux = [
+    "python-xlib>=0.33; platform_system == 'Linux'",
+    "dbus-next>=0.2.3; platform_system == 'Linux'",
+    "rapidocr-onnxruntime>=1.3; platform_system == 'Linux'",
+]
+ocr = [
+    "rapidocr-onnxruntime>=1.3",
+    "pytesseract>=0.3.10",
+]
 vision = ["ultralytics>=8.2"]
 mcp = ["mcp>=2"]
-pad = ["vgamepad>=0.1.0"]
+pad = ["vgamepad>=0.1.0; platform_system == 'Windows'"]
 serial = ["pyserial>=3.5"]
-all = ["pctr[vision,mcp,pad,serial]"]
+all = ["pctr[windows,linux,ocr,vision,mcp,pad,serial]"]
 
 [project.scripts]
 pctr = "pctr.cli:main"

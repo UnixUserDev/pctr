@@ -1,15 +1,16 @@
 ---
 name: pctr
-description: Drive native Windows desktop apps (not browsers) with the pctr CLI powered by pywinauto/UIA, with OCR and YOLO-World fallbacks. Use whenever you must control or inspect a desktop GUI - list windows, dump a control tree, click buttons, type into fields, read on-screen text by OCR, find objects by description, send hotkeys, hold keys, drag, or screenshot an app. Element-based, no pixel hunting. Triggers: pctr, UIA, UI automation, pywinauto, desktop automation, click a button in an app, type into an app, drive a GUI, control a Windows application, usecomputer.
+description: Drive native desktop apps (not browsers) with the pctr CLI - Windows via pywinauto/UIA, Linux X11 via AT-SPI2 - with OCR and YOLO-World fallbacks. Use whenever you must control or inspect a desktop GUI - list windows, dump a control tree, click buttons, type into fields, read on-screen text by OCR, find objects by description, send hotkeys, hold keys, drag, or screenshot an app. Element-based, no pixel hunting. Triggers: pctr, UIA, AT-SPI, UI automation, pywinauto, desktop automation, click a button in an app, type into an app, drive a GUI, control a desktop application, usecomputer.
 ---
 
 # pctr - desktop control
 
-**PCTR — Personal Computer Tactile Response.** Element-based Windows automation.
+**PCTR — Personal Computer Tactile Response.** Element-based automation.
 Find a control by its name / control type / automation id and act on it, so
-window moves, DPI, and layout changes don't break you. Windows only (UI
-Automation). Built on `pywinauto` + `uiautomation`, with `pyautogui` /
-`pydirectinput` for raw mouse and keyboard.
+window moves, DPI, and layout changes don't break you. Windows uses UI
+Automation (`pywinauto` + `uiautomation`); Linux X11 uses AT-SPI2 (accessibility
+D-Bus) + XTest. Pick the platform with `--backend auto|windows|x11|wayland`
+(`auto` is correct almost always).
 
 ## Three ways to find a target
 
