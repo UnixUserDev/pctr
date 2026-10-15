@@ -29,10 +29,11 @@ server = MCPServer(
     "pctr",
     version=_VERSION or "0.0.0",
     instructions=(
-        "Element-based Windows UI automation. Find controls by name / control "
+        "Element-based UI automation. Find controls by name / control "
         "type / automation id instead of pixel coordinates, then click/type/etc. "
         "Also: OCR (ocr/ocrfind/ocrclick), YOLO-World (look), and virtual desktops "
-        "(desktop). Windows only."
+        "(desktop). Supports Windows (UIA) and Linux X11 (AT-SPI2). "
+        "Wayland is not yet supported."
     ),
 )
 

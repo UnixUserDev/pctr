@@ -2,16 +2,18 @@
 
 **PCTR — Personal Computer Tactile Response**
 
-Element-based Windows UI Automation CLI for AI agents.
+Element-based UI automation CLI for AI agents. **Windows (UIA)** and **Linux X11 (AT-SPI2)**.
 
 Instead of screenshotting and guessing pixel coordinates, `pctr` finds controls
 by their **name / control type / automation id** and acts on them. Window moves,
 DPI changes, and layout shifts don't break your script.
 
-Built on `pywinauto` (UI Automation) with `pyautogui` / `pydirectinput` for raw
-mouse and keyboard input. On top of UIA it also offers **OCR**
-(`Windows.Media.Ocr`) and **YOLO-World** open-vocabulary detection for text and
-objects that aren't exposed as controls.
+On Windows it is built on `pywinauto` (UI Automation) with `pyautogui` /
+`pydirectinput` for raw mouse and keyboard. On Linux it uses AT-SPI2 (over the
+accessibility D-Bus, no `pyatspi` needed), XTest (`python-xlib`) for input,
+`mss`/compositor capture for screenshots, and `rapidocr`/tesseract for OCR.
+On top of that it offers **OCR** and **YOLO-World** open-vocabulary detection for
+text and objects that aren't exposed as controls.
 
 ![pctr driving by element name: enumerating windows, mapping virtual desktops, dumping the control tree, filling a field, then reading it back with OCR](docs/demo.gif)
 
@@ -21,21 +23,41 @@ detect. Recorded with OBS, which pctr also piloted.*
 
 ## Install
 
+### Windows
+
 ```bash
-pip install pctr             # core (UIA + OCR)
-pip install "pctr[vision]"   # + ultralytics, for `pctr look`
-pip install "pctr[mcp]"      # + MCP SDK, for the MCP server
-pip install "pctr[pad]"      # + vgamepad, for `pctr pad` (needs ViGEmBus)
-pip install "pctr[serial]"   # + pyserial, for `pctr hid` / the serial-hid backend
-pip install "pctr[all]"      # everything
+pip install "pctr[windows]"   # UIA + input
+pip install "pctr[vision]"    # + ultralytics, for `pctr look`
+pip install "pctr[mcp]"       # + MCP SDK, for the MCP server
+pip install "pctr[pad]"       # + vgamepad, for `pctr pad` (needs ViGEmBus)
+pip install "pctr[serial]"    # + pyserial, for `pctr hid` / the serial-hid backend
+pip install "pctr[all]"       # everything
 ```
 
-Windows only.
+### Linux (X11 / XWayland)
+
+```bash
+pip install "pctr[linux]"     # python-xlib + dbus-next + rapidocr
+```
+
+Requires the accessibility bus to be running (`at-spi2-core`; on most desktops
+it already is). Element targeting uses AT-SPI2, so **apps must expose
+accessibility** (GTK/Qt/Electron do; many X11 toolkits and games do not).
+Screenshots use `mss`; under Wayland it falls back to `spectacle` (KDE) or
+`grim`. Global synthetic input goes through XTest, which works for X11/XWayland
+apps — native Wayland clients are not reachable (protocol design). Use
+`--backend auto|windows|x11|wayland` to pick explicitly.
+
+### Both
+
+```bash
+pip install "pctr[ocr]"       # rapidocr + pytesseract
+```
 
 ## MCP server
 
 `pctr` ships a Model Context Protocol server so MCP clients (Claude Desktop,
-Cursor, opencode, ...) can drive the Windows desktop directly:
+Cursor, opencode, ...) can drive the desktop directly:
 
 ```bash
 pip install "pctr[mcp]"
@@ -226,3 +248,7 @@ pctr hid type --text "hello" --port COM5
 ## License
 
 MIT
+
+---
+
+AI-generated with [OpenCode](https://opencode.ai) — primary model: DeepSeek V4.1 Flash.
