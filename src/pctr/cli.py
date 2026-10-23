@@ -12,13 +12,18 @@ for _stream in (sys.stdout, sys.stderr):
         except Exception:
             pass
 
-DESCRIPTION = "Element-based UI Automation CLI for AI agents (Windows / Linux X11)."
+DESCRIPTION = "Element-based UI Automation CLI for AI agents (Windows / Linux)."
 
+# The source tree is the source of truth: an editable install keeps stale
+# dist-info metadata (0.5.0) and `pctr --version` must not lie about it.
 try:
-    from importlib.metadata import version as _pkg_version
-    _VERSION = _pkg_version("pctr")
+    from pctr import __version__ as _VERSION
 except Exception:
-    _VERSION = "unknown"
+    try:
+        from importlib.metadata import version as _pkg_version
+        _VERSION = _pkg_version("pctr")
+    except Exception:
+        _VERSION = "unknown"
 
 
 def _fail(msg, code=2) -> NoReturn:
@@ -108,6 +113,10 @@ def cmd_windows(args):
     rx = _compile(args.filter, "filter") if args.filter else None
     proc = getattr(args, "process", None)
     rows = be.list_windows(filter_re=rx, process=proc)
+    err = getattr(be, "last_error", None)
+    if err:
+        # X11-only rows are not the whole desktop: say why the rest is missing.
+        print("warning: %s" % err, file=__import__("sys").stderr)
     out = [{"hwnd": w.handle, "pid": w.pid, "title": w.title} for w in rows]
     if _is_json(args):
         _print_json(out)
@@ -120,32 +129,43 @@ def cmd_tree(args):
     be = _backend(args)
     handle = be.find_window(args.title, args.process, args.timeout)
     depth = getattr(args, "depth", None)
-    depth_mode = depth is not None and 0 <= depth < 99
-    it = be.get_elements(handle, max_depth=depth, limit=args.limit) if depth_mode else be.get_elements(handle, limit=args.limit)
+    tree = be.get_tree(handle, max_depth=depth if depth is not None else 99, limit=args.limit)
     rows = []
     truncated = False
-    for el, d in it:
-        rows.append(_el_dict(el, d if depth_mode else None))
+    for el, d in tree.elements:
+        rows.append(_el_dict(el, d))
         if len(rows) >= args.limit:
             truncated = True
             break
     title = be.get_window_title(handle)
     pid = be.get_window_pid(handle)
+    if not rows and not tree.error:
+        tree.error = "no elements exposed"
     if _is_json(args):
         _print_json({
             "window": title,
             "pid": pid,
             "elements": rows,
             "truncated": truncated,
+            "backend": tree.backend,
+            "opaque": tree.opaque,
+            "error": tree.error,
         })
-        return
-    print("WINDOW: %s (pid=%s)" % (title, pid))
-    for r in rows:
-        prefix = "  " * (r["depth"] - 1) if depth_mode else ""
-        print("  %s%s | type=%s | id=%s | rect=%d,%d,%d,%d" % (
-            prefix, r["name"], r["type"], r["id"], *r["rect"]))
-    if truncated:
-        print("... (limit %d reached)" % args.limit)
+    else:
+        print("WINDOW: %s (pid=%s)" % (title, pid))
+        for r in rows:
+            prefix = "  " * (r["depth"] - 1)
+            print("  %s%s | type=%s | id=%s | rect=%d,%d,%d,%d" % (
+                prefix, r["name"], r["type"], r["id"], *r["rect"]))
+        if truncated:
+            print("... (limit %d reached)" % args.limit)
+    if not rows:
+        # Say *why* it is empty; JSON consumers keep exit 0 and read "error".
+        print("error: %s" % tree.error, file=__import__("sys").stderr)
+        if not _is_json(args):
+            raise SystemExit(1)
+    if tree.opaque and not _is_json(args):
+        print("warning: %s" % tree.error, file=__import__("sys").stderr)
 
 
 def cmd_find(args):
@@ -204,6 +224,83 @@ def cmd_set(args):
         print("set via backend")
     except Exception as e:
         _fail("set failed: %s" % e)
+
+
+def cmd_action(args):
+    """List or invoke the named AT-SPI actions an element advertises."""
+    be = _backend(args)
+    handle, el, n = _get_element(args)
+    if args.list:
+        names = be.action_names(handle, el)
+        if _is_json(args):
+            _print_json({"target": el.name, "actions": names})
+        else:
+            print("target: %s" % _describe(el))
+            print("actions: %s" % (", ".join(names) or "(none)"))
+        return
+    if args.toggle:
+        ok = be.toggle_element(handle, el)
+        if not ok:
+            _fail("toggle failed (control type %s)" % el.control_type)
+        print("toggled")
+        return
+    if not args.do:
+        _fail("give --do <action-name> (or --list to see them)")
+    ok = be.action(handle, el, args.do)
+    if not ok:
+        _fail("action %r failed or is not supported by this element" % args.do)
+    print("invoked %s" % args.do)
+
+
+def cmd_value(args):
+    """Read or set the Value/RangeValue of a slider, spinner, or progress bar."""
+    be = _backend(args)
+    handle, el, n = _get_element(args)
+    if args.set is not None:
+        ok = be.set_element_value(handle, el, args.set)
+        if not ok:
+            _fail("element has no settable Value (control type %s)" % el.control_type)
+        print("value set to %s" % args.set)
+        return
+    val = be.get_element_value(handle, el)
+    if val is None:
+        _fail("element has no Value (control type %s)" % el.control_type)
+    if _is_json(args):
+        _print_json({"target": el.name, "value": val})
+    else:
+        print("%s = %s" % (el.name, val))
+
+
+def cmd_select(args):
+    """Select/deselect a list item, table cell, or tab."""
+    be = _backend(args)
+    handle, el, n = _get_element(args)
+    ok = be.select_element(handle, el, deselect=args.deselect)
+    if not ok:
+        _fail("element does not support selection (control type %s)" % el.control_type)
+    print("deselected" if args.deselect else "selected")
+
+
+def cmd_text(args):
+    """Read text at a character offset from a Text-capable element."""
+    be = _backend(args)
+    handle, el, n = _get_element(args)
+    text = be.element_text(handle, el, args.offset)
+    if not text:
+        _fail("element exposes no Text (control type %s)" % el.control_type)
+    if _is_json(args):
+        _print_json({"target": el.name, "offset": args.offset, "text": text})
+    else:
+        print(text)
+
+
+def cmd_scroll(args):
+    """Scroll an element into view."""
+    be = _backend(args)
+    handle, el, n = _get_element(args)
+    if not be.scroll_element(handle, el):
+        _fail("element cannot scroll (control type %s)" % el.control_type)
+    print("scrolled")
 
 
 def _chunks(text, size):
@@ -1065,6 +1162,35 @@ def build_parser():
     add_target(s, require_selector=True)
     s.add_argument("--text", required=True)
     s.set_defaults(func=cmd_set)
+
+    ac = sub.add_parser("action", help="List or invoke named element actions (AT-SPI: toggle, expand, press, ...)")
+    add_target(ac, require_selector=True)
+    ac.add_argument("--do", default=None, metavar="NAME", help="Invoke this action by name")
+    ac.add_argument("--list", action="store_true", help="List the actions the element advertises")
+    ac.add_argument("--toggle", action="store_true", help="Shorthand for a checkbox/switch toggle")
+    _add_json(ac)
+    ac.set_defaults(func=cmd_action)
+
+    va = sub.add_parser("value", help="Read or set an element's Value (slider, spinner, progress bar)")
+    add_target(va, require_selector=True)
+    va.add_argument("--set", type=float, default=None, metavar="N", help="Set the value instead of reading it")
+    _add_json(va)
+    va.set_defaults(func=cmd_value)
+
+    se = sub.add_parser("select", help="Select (or --deselect) a list item, table cell, or tab")
+    add_target(se, require_selector=True)
+    se.add_argument("--deselect", action="store_true")
+    se.set_defaults(func=cmd_select)
+
+    tx = sub.add_parser("text", help="Read text at a character offset from a Text-capable element")
+    add_target(tx, require_selector=True)
+    tx.add_argument("--offset", type=int, default=0)
+    _add_json(tx)
+    tx.set_defaults(func=cmd_text)
+
+    sc = sub.add_parser("scroll", help="Scroll an element into view")
+    add_target(sc, require_selector=True)
+    sc.set_defaults(func=cmd_scroll)
 
     ty = sub.add_parser("type", help="Send keystrokes")
     ty.add_argument("--title", default=None)

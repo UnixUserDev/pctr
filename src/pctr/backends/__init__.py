@@ -19,12 +19,9 @@ def detect_platform() -> str:
     if sys.platform == "linux":
         session = os.environ.get("XDG_SESSION_TYPE", "").lower()
         if session == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
-            # Under a Wayland session, XWayland is usually present (DISPLAY set).
-            # Native Wayland windows are invisible to X11, but XWayland clients
-            # (and everything driven through AT-SPI / XTest) still work. Prefer
-            # x11 over an unimplemented wayland backend when DISPLAY is available.
-            if os.environ.get("DISPLAY"):
-                return "x11"
+            # Elements, actions and window discovery run over AT-SPI and work
+            # identically on Wayland; XWayland only adds pointer input,
+            # screenshots and window geometry. Same backend either way.
             return "wayland"
         return "x11"
     return "unknown"
@@ -37,11 +34,11 @@ def get_backend(name: str = "auto") -> "Backend":
     if name == "windows":
         from .windows import WindowsBackend
         return WindowsBackend()
-    if name == "x11":
+    if name in ("x11", "wayland"):
+        # One Linux backend: AT-SPI for elements (works on both display
+        # servers) plus XTest/mss/EWMH where an X display exists. On a pure
+        # Wayland session input and screenshots raise a clear error instead of
+        # pretending the window layer exists.
         from .x11 import X11Backend
         return X11Backend()
-    if name == "wayland":
-        raise SystemExit(
-            "wayland backend is not yet implemented (planned: libei + xdg-desktop-portal)"
-        )
     raise SystemExit("unknown backend %r (auto | windows | x11 | wayland)" % name)

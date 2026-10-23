@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pctr"
-version = "0.5.0"
-description = "PCTR - Personal Computer Tactile Response. Element-based UI Automation CLI for AI agents. Windows (UIA) and Linux X11 (AT-SPI2)."
+version = "0.6.0"
+description = "PCTR - Personal Computer Tactile Response. Element-based UI Automation CLI for AI agents. Windows (UIA) and Linux (AT-SPI2), X11 and Wayland."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -27,7 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "mss>=9.0",
-    "pillow>=9.0",
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
