@@ -26,6 +26,22 @@ class ElementInfo:
     rect: tuple[int, int, int, int]  # left, top, right, bottom
     depth: int = 0
     ref: tuple[str, str] | None = None  # (dbus bus name, object path) for AT-SPI
+    interfaces: tuple[str, ...] = ()    # AT-SPI interfaces the node advertises
+
+
+@dataclass
+class TreeResult:
+    """An element tree plus an honest verdict about whether it is usable.
+
+    ``opaque`` means the application answered but publishes no widgets (an
+    Electron app launched without accessibility, a JVM app without the ATK
+    bridge, ...). That is a different failure from ``error``, which means the
+    backend could not produce a tree at all.
+    """
+    elements: list[tuple[ElementInfo, int]] = field(default_factory=list)
+    opaque: bool = False
+    error: str | None = None
+    backend: str = "native"
 
 
 @dataclass
@@ -67,6 +83,16 @@ class Backend(ABC):
     def get_elements(self, handle: int, max_depth: int = 99,
                      limit: int = 400) -> list[tuple[ElementInfo, int]]: ...
 
+    def get_tree(self, handle: int, max_depth: int = 99,
+                 limit: int = 400) -> "TreeResult":
+        """Element tree plus diagnostics.
+
+        Backends that cannot tell "empty" from "hidden" fall back to plain
+        elements; Linux/AT-SPI overrides this to report opaque applications.
+        """
+        return TreeResult(elements=list(self.get_elements(handle, max_depth=max_depth, limit=limit)),
+                          backend="native")
+
     @abstractmethod
     def find_elements(self, handle: int, name: str | None = None,
                       control_type: str | None = None,
@@ -86,6 +112,35 @@ class Backend(ABC):
     @abstractmethod
     def type_element_text(self, handle: int, el: ElementInfo,
                           text: str, delay: float = 0.0) -> None: ...
+
+    # --- Element patterns (optional: platforms that cannot express them
+    # fall back to these defaults, and the CLI reports "not supported") ---
+
+    def action_names(self, handle: int, el: ElementInfo) -> list[str]:
+        """Named actions this element advertises (Windows: unsupported)."""
+        return []
+
+    def action(self, handle: int, el: ElementInfo, name: str) -> bool:
+        """Invoke a named action ("toggle", "expand", "press", ...)."""
+        return False
+
+    def toggle_element(self, handle: int, el: ElementInfo) -> bool:
+        return False
+
+    def get_element_value(self, handle: int, el: ElementInfo) -> float | str | None:
+        return None
+
+    def set_element_value(self, handle: int, el: ElementInfo, value: float) -> bool:
+        return False
+
+    def select_element(self, handle: int, el: ElementInfo, deselect: bool = False) -> bool:
+        return False
+
+    def element_text(self, handle: int, el: ElementInfo, offset: int = 0) -> str:
+        return ""
+
+    def scroll_element(self, handle: int, el: ElementInfo) -> bool:
+        return False
 
     # --- Input (global) ---
     @abstractmethod

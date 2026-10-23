@@ -2,7 +2,7 @@
 
 **PCTR — Personal Computer Tactile Response**
 
-Element-based UI automation CLI for AI agents. **Windows (UIA)** and **Linux X11 (AT-SPI2)**.
+Element-based UI automation CLI for AI agents. **Windows (UIA)** and **Linux (AT-SPI2), X11 and Wayland**.
 
 Instead of screenshotting and guessing pixel coordinates, `pctr` finds controls
 by their **name / control type / automation id** and acts on them. Window moves,
@@ -14,6 +14,24 @@ accessibility D-Bus, no `pyatspi` needed), XTest (`python-xlib`) for input,
 `mss`/compositor capture for screenshots, and `rapidocr`/tesseract for OCR.
 On top of that it offers **OCR** and **YOLO-World** open-vocabulary detection for
 text and objects that aren't exposed as controls.
+
+Linux notes (0.6.0):
+
+* `pctr windows` lists real applications with real PIDs, including native
+  Wayland clients that X cannot see — the window list comes from the
+  accessibility bus, not from X atoms.
+* The tree walk is breadth-first and concurrent: the walk for a 375-node Qt
+  window takes ~0.4–1.0 s instead of ~5.5 s serially. End-to-end `pctr tree`
+  is ~0.6–1.8 s on this machine, interpreter startup and window discovery
+  included.
+* `tree --json` carries `opaque` and `error`. `opaque: true` means the app
+  answered but publishes no widgets (Electron without
+  `--force-renderer-accessibility`, JVM without the ATK bridge) — that is a
+  different problem from "the accessibility bus is down", and pctr says which.
+* Act by *action*, not by coordinates: `pctr action --list`, `pctr action --do`,
+  `pctr value --set`, `pctr select`. AT-SPI actions reach native Wayland
+  windows; synthetic XTest clicks only reach XWayland clients.
+
 
 ![pctr driving by element name: enumerating windows, mapping virtual desktops, dumping the control tree, filling a field, then reading it back with OCR](docs/demo.gif)
 
@@ -34,7 +52,7 @@ pip install "pctr[serial]"    # + pyserial, for `pctr hid` / the serial-hid back
 pip install "pctr[all]"       # everything
 ```
 
-### Linux (X11 / XWayland)
+### Linux (X11 and Wayland)
 
 ```bash
 pip install "pctr[linux]"     # python-xlib + dbus-next + rapidocr
@@ -44,9 +62,17 @@ Requires the accessibility bus to be running (`at-spi2-core`; on most desktops
 it already is). Element targeting uses AT-SPI2, so **apps must expose
 accessibility** (GTK/Qt/Electron do; many X11 toolkits and games do not).
 Screenshots use `mss`; under Wayland it falls back to `spectacle` (KDE) or
-`grim`. Global synthetic input goes through XTest, which works for X11/XWayland
-apps — native Wayland clients are not reachable (protocol design). Use
-`--backend auto|windows|x11|wayland` to pick explicitly.
+`grim`.
+
+Elements, window discovery and AT-SPI actions work on **both display servers**:
+`--backend wayland` is a real backend, not a stub. What still needs X is
+synthetic input (XTest), screenshots and window geometry — those raise a clear
+error instead of silently doing nothing when no X display exists. Native Wayland
+clients cannot receive synthetic clicks (protocol design), so use
+`pctr action` / `pctr value` / `pctr select` for those; coordinate clicks only
+reach XWayland clients. Pure-Wayland input (libei / xdg-desktop-portal
+RemoteDesktop) is not implemented yet. Use `--backend auto|windows|x11|wayland`
+to pick explicitly.
 
 ### Both
 
@@ -97,6 +123,11 @@ run in the background, reachable at `http://127.0.0.1:8765/mcp` (or `…/sse`).
 | `pctr find --title RE [--name RE] [--limit N] [--nth N]` | List matching elements. |
 | `pctr click --title RE --name RE [--method auto\|invoke\|mouse] [--dbl]` | Click an element. |
 | `pctr set --title RE --name RE --text S` | Set a field via the UIA ValuePattern (exact, instant). |
+| `pctr action --title RE --name RE --list` / `--do "Show Menu"` / `--toggle` | List or invoke named AT-SPI actions (Linux). Works on native Wayland windows. |
+| `pctr value --title RE --name RE [--set N]` | Read or set a slider/spinner/progress Value (Linux). |
+| `pctr select --title RE --name RE [--deselect]` | Select a list item, table cell, or tab (Linux). |
+| `pctr text --title RE --name RE [--offset N]` | Read text at a character offset (Linux). |
+| `pctr scroll --title RE --name RE` | Scroll an element into view (Linux). |
 | `pctr type [--title RE --name RE] --text S [--delay 0.03] [--chunk 1]` | Send keystrokes (see notes). |
 | `pctr keys --keys "{ENTER}"` | Send a global key combo (pywinauto syntax). |
 | `pctr hotkey --keys ctrl+s` | Send a modifier combo (prefer this over `keys "^s"`). |

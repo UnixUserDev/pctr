@@ -6,13 +6,31 @@ import os
 import re
 import time
 
-from .base import Backend, WindowInfo, ElementInfo
+from .base import Backend, WindowInfo, ElementInfo, TreeResult
 from .input import X11Input
 from .ocr import RapidOCRBackend, TesseractOCR
-from .atspi import AtspiClient
+from .atspi import AppWindow, AtspiClient
 
 
 # --- AT-SPI2 role -> UIA control-type mapping ----------------------------------
+
+
+_ATOMS = {
+    "_NET_WM_NAME": "_NET_WM_NAME",
+    "_UTF8_STRING": "UTF8_STRING",
+    "_WM_NAME": "WM_NAME",
+    "_NET_WM_PID": "_NET_WM_PID",
+    "_NET_CLIENT_LIST": "_NET_CLIENT_LIST",
+    "_NET_ACTIVE_WINDOW": "_NET_ACTIVE_WINDOW",
+    "_NET_CURRENT_DESKTOP": "_NET_CURRENT_DESKTOP",
+    "_NET_NUMBER_OF_DESKTOPS": "_NET_NUMBER_OF_DESKTOPS",
+    "_NET_DESKTOP_NAMES": "_NET_DESKTOP_NAMES",
+    "_NET_WM_DESKTOP": "_NET_WM_DESKTOP",
+    "_NET_WM_WINDOW_TYPE": "_NET_WM_WINDOW_TYPE",
+    "_NET_WM_STATE": "_NET_WM_STATE",
+    "_NET_WM_STATE_MAXIMIZED_HORZ": "_NET_WM_STATE_MAXIMIZED_HORZ",
+    "_NET_WM_STATE_MAXIMIZED_VERT": "_NET_WM_STATE_MAXIMIZED_VERT",
+}
 
 
 def _fail(msg, code=2):
@@ -21,33 +39,99 @@ def _fail(msg, code=2):
 
 
 class X11Backend(Backend):
-    """Linux X11 backend using python-xlib, mss, PIL, and rapidocr/tesseract."""
+    """Linux backend: AT-SPI2 elements, XTest input, EWMH windows, mss screenshots.
+
+    Elements come from the accessibility bus, which works under both X11 and
+    Wayland. The X connection is optional and only used for input, screenshots
+    and window geometry -- on a native Wayland session (no XWayland) those
+    raise a clear error while element discovery and AT-SPI actions keep working.
+
+    Windows that exist only on the accessibility bus (native Wayland clients)
+    get synthesised negative handles so the rest of the stack, which speaks
+    integer handles, keeps working unchanged.
+    """
 
     def __init__(self):
-        from Xlib import display, X
-        from Xlib.protocol import rq
-
-        self._display = display.Display()
-        self._X = X
-        self._root = self._display.screen().root
-        self._NET_WM_NAME = self._display.intern_atom("_NET_WM_NAME")
-        self._UTF8_STRING = self._display.intern_atom("UTF8_STRING")
-        self._WM_NAME = self._display.intern_atom("WM_NAME")
-        self._NET_WM_PID = self._display.intern_atom("_NET_WM_PID")
-        self._NET_CLIENT_LIST = self._display.intern_atom("_NET_CLIENT_LIST")
-        self._NET_ACTIVE_WINDOW = self._display.intern_atom("_NET_ACTIVE_WINDOW")
-        self._NET_CURRENT_DESKTOP = self._display.intern_atom("_NET_CURRENT_DESKTOP")
-        self._NET_NUMBER_OF_DESKTOPS = self._display.intern_atom("_NET_NUMBER_OF_DESKTOPS")
-        self._NET_DESKTOP_NAMES = self._display.intern_atom("_NET_DESKTOP_NAMES")
-        self._NET_WM_DESKTOP = self._display.intern_atom("_NET_WM_DESKTOP")
-        self._NET_WM_WINDOW_TYPE = self._display.intern_atom("_NET_WM_WINDOW_TYPE")
-        self._NET_WM_STATE = self._display.intern_atom("_NET_WM_STATE")
-        self._NET_WM_STATE_MAXIMIZED_HORZ = self._display.intern_atom("_NET_WM_STATE_MAXIMIZED_HORZ")
-        self._NET_WM_STATE_MAXIMIZED_VERT = self._display.intern_atom("_NET_WM_STATE_MAXIMIZED_VERT")
-
-        self._input = X11Input()
+        self._display = None
+        self._X = None
+        self._root = None
+        self._input_obj = None
         self._ocr_engine = None  # lazy
         self._atspi_client = AtspiClient()  # D-Bus AT-SPI (no pyatspi needed)
+        self._remote: dict[int, tuple[str, str]] = {}
+        self._remote_info: dict[int, AppWindow] = {}
+        self._next_remote = -1
+        self.last_error: str | None = None
+        self._ensure_x(silent=True)
+        try:
+            import atexit
+            atexit.register(self.close)
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        """Release the X connection and the shared accessibility session."""
+        try:
+            if self._display is not None:
+                self._display.close()
+        except Exception:
+            pass
+        self._display = None
+        try:
+            from .atspi import close_session
+            close_session()
+        except Exception:
+            pass
+
+    # --- X plumbing ---
+
+    def _ensure_x(self, silent: bool = False):
+        """Connect to X (XWayland counts); elements do not need it, input does."""
+        if self._display is not None:
+            return self._display
+        try:
+            from Xlib import display
+            disp = display.Display()
+            self._display = disp
+            self._X = __import__("Xlib.X", fromlist=["X"])
+            self._root = disp.screen().root
+            for attr, atom in _ATOMS.items():
+                setattr(self, attr, disp.intern_atom(atom))
+            return disp
+        except Exception as e:
+            self._display = None
+            if silent:
+                return None
+            raise SystemExit(
+                "no X display available -- input, screenshots and window geometry need "
+                "X11/XWayland (%s). Element discovery and AT-SPI actions still work." % e
+            )
+
+    @property
+    def _input(self):
+        if self._input_obj is None:
+            self._ensure_x()
+            self._input_obj = X11Input()
+        return self._input_obj
+
+    @_input.setter
+    def _input(self, value):
+        self._input_obj = value
+
+    # --- AT-SPI-only windows (Wayland: no XID to key off) ---
+
+    def _remote_handle(self, win: AppWindow) -> int:
+        key = (win.bus, win.path)
+        for handle, ref in self._remote.items():
+            if ref == key:
+                self._remote_info[handle] = win
+                return handle
+        handle = self._next_remote
+        self._next_remote -= 1
+        self._remote[handle] = key
+        self._remote_info[handle] = win
+        return handle
+
 
     # --- Window management ---
 
@@ -106,6 +190,8 @@ class X11Backend(Backend):
 
     def _all_windows(self) -> list:
         """Return all managed windows from _NET_CLIENT_LIST."""
+        if self._ensure_x(silent=True) is None:
+            return []
         try:
             prop = self._root.get_full_property(self._NET_CLIENT_LIST, self._X.AnyPropertyType)
             if prop and prop.value:
@@ -119,7 +205,10 @@ class X11Backend(Backend):
         except Exception:
             return []
 
-    def list_windows(self, filter_re=None, process=None):
+    def _x11_windows(self, filter_re=None, process=None):
+        """Windows known to the X server (X11 or XWayland clients only)."""
+        if self._ensure_x(silent=True) is None:
+            return []
         rows = []
         for wid in self._all_windows():
             try:
@@ -140,8 +229,59 @@ class X11Backend(Backend):
                 continue
         return rows
 
+    def _atspi_windows(self, filter_re=None, process=None):
+        """Windows on the accessibility bus that X cannot see (native Wayland)."""
+        try:
+            wins = self._atspi_client.windows()
+            self.last_error = None
+        except Exception as e:
+            # Remember it: an empty list must not look like an empty desktop.
+            self.last_error = "accessibility bus: %s" % e
+            return []
+        rows = []
+        seen: set[tuple[int, str, str]] = set()
+        for w in wins:
+            if filter_re and filter_re.search(w.title or "") is None and filter_re.search(w.app_name or "") is None:
+                continue
+            if process is not None and w.pid != process:
+                continue
+            # Panels and overlays expose several frames with the same label
+            # ("plasmashell" x7); identical title+app entries are noise.
+            key = (w.pid, w.title, w.app_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(WindowInfo(handle=self._remote_handle(w), title=w.title or w.app_name,
+                                   pid=w.pid, desktop=0))
+        return rows
+
+    def list_windows(self, filter_re=None, process=None):
+        """X windows plus accessibility-bus windows, de-duplicated by PID.
+
+        Under a Wayland session X only sees XWayland clients, so the AT-SPI
+        list is what makes `pctr windows` show the actual desktop.
+        """
+        rows = self._x11_windows(filter_re, process)
+        seen_pids = {w.pid for w in rows if w.pid}
+        live: set[int] = set()
+        for w in self._atspi_windows(filter_re, process):
+            if w.pid and w.pid in seen_pids:
+                continue
+            rows.append(w)
+            live.add(w.handle)
+        # Forget synthesised handles for windows that have closed.
+        if not filter_re and process is None:
+            for handle in list(self._remote):
+                if handle not in live:
+                    self._remote.pop(handle, None)
+                    self._remote_info.pop(handle, None)
+        return rows
+
     def find_window(self, title_re, process=None, timeout=5.0):
-        rx = re.compile(title_re, re.I) if title_re else None
+        try:
+            rx = re.compile(title_re, re.I) if title_re else None
+        except re.error as e:
+            raise SystemExit("bad --title regex %r: %s" % (title_re, e))
         deadline = time.time() + timeout
         last = 0
         while True:
@@ -152,26 +292,47 @@ class X11Backend(Backend):
             if time.time() >= deadline:
                 break
             time.sleep(0.25)
+        why = getattr(self, "last_error", None)
         raise SystemExit(
-            "window not found: title_re=%r process=%r (saw %d match(es))" % (title_re, process, last)
+            "window not found: title_re=%r process=%r (saw %d match(es))%s" % (
+                title_re, process, last, " -- %s" % why if why else ""
+            )
         )
 
+    def _remote_of(self, handle) -> AppWindow | None:
+        return self._remote_info.get(handle)
+
     def get_window_title(self, handle):
-        win = self._display.create_resource_object("window", handle)
-        return self._get_window_title(win)
+        win = self._remote_of(handle)
+        if win is not None:
+            return win.title or win.app_name
+        self._ensure_x()
+        w = self._display.create_resource_object("window", handle)
+        return self._get_window_title(w)
 
     def get_window_pid(self, handle):
-        win = self._display.create_resource_object("window", handle)
-        return self._get_window_pid(win)
+        win = self._remote_of(handle)
+        if win is not None:
+            return win.pid
+        self._ensure_x()
+        w = self._display.create_resource_object("window", handle)
+        return self._get_window_pid(w)
 
     def get_window_rect(self, handle):
-        win = self._display.create_resource_object("window", handle)
+        win = self._remote_of(handle)
+        if win is not None:
+            # No XID on Wayland: ask the accessibility bus where the frame is.
+            for el, _ in self.get_elements(handle, max_depth=1, limit=1):
+                return el.rect
+            return (0, 0, 0, 0)
+        self._ensure_x()
+        w = self._display.create_resource_object("window", handle)
         try:
-            geom = win.get_geometry()
+            geom = w.get_geometry()
             # get_geometry() is parent-relative under a reparenting WM; translate
             # the window origin to root coordinates so screenshots/clicks line up.
             try:
-                coords = win.translate_coords(self._root, 0, 0)
+                coords = w.translate_coords(self._root, 0, 0)
                 x, y = int(coords.x), int(coords.y)
             except Exception:
                 x, y = int(geom.x), int(geom.y)
@@ -180,6 +341,14 @@ class X11Backend(Backend):
             raise SystemExit("cannot get geometry for window 0x%x" % handle)
 
     def focus_window(self, handle):
+        if self._remote_of(handle) is not None:
+            # Wayland: no way to raise another app's window without the
+            # compositor's cooperation. Invoking an element still works; say so.
+            raise SystemExit(
+                "cannot focus a Wayland window by handle -- use element actions "
+                "(pctr click --title ...) instead of window focus"
+            )
+        self._ensure_x()
         win = self._display.create_resource_object("window", handle)
         try:
             # Try _NET_ACTIVE_WINDOW first (EWMH)
@@ -195,16 +364,42 @@ class X11Backend(Backend):
 
     # --- Element tree (AT-SPI2 over D-Bus) ---
 
-    def _atspi_title(self, handle) -> str:
-        return self.get_window_title(handle)
+    def _atspi_ref(self, handle):
+        """Resolve an integer window handle to an AT-SPI (bus, path) ref."""
+        win = self._remote_of(handle)
+        if win is not None:
+            return win.ref
+        title = self.get_window_title(handle)
+        pid = self.get_window_pid(handle) or None
+        if not title and pid is None:
+            return None
+        # The window title is data, not a pattern: a title like "Report (final)"
+        # would otherwise raise or match the wrong window.
+        found = self._atspi_client.resolve_window(title or None, pid, literal=True)
+        if found is None and title:
+            # window title and accessible frame name often differ slightly
+            found = self._atspi_client.resolve_window(title[:40], pid, literal=False)
+        return found.ref if found is not None else None
 
     def get_elements(self, handle, max_depth=99, limit=400):
         """Walk the AT-SPI tree for the window. Returns list of (ElementInfo, depth)."""
-        title = self._atspi_title(handle)
-        if not title:
+        ref = self._atspi_ref(handle)
+        if ref is None:
             return []
-        rows = self._atspi_client.get_elements(title, max_depth=max_depth, limit=limit)
+        rows = self._atspi_client.get_elements(ref, max_depth=max_depth, limit=limit)
         return [(el, el.depth) for el in rows]
+
+    def get_tree(self, handle, max_depth=99, limit=400):
+        """Element tree plus "is this app actually automatable?" diagnostics."""
+        ref = self._atspi_ref(handle)
+        if ref is None:
+            return TreeResult(
+                elements=[],
+                error="window is not on the accessibility bus -- the app may be "
+                      "sandboxed, or at-spi2-core is not running",
+                backend="atspi",
+            )
+        return self._atspi_client.get_tree(ref, max_depth=max_depth, limit=limit)
 
     def _reopen_atspi(self, handle, el):
         """Re-resolve an element ref by matching name+rect in the window tree."""
@@ -224,6 +419,50 @@ class X11Backend(Backend):
         return out
 
     # --- Element actions ---
+
+    # Control types that actually have a checked/unchecked state. A menu item
+    # advertising "press" is NOT one of these: firing it via --toggle would
+    # activate whatever it is (including "Delete", "Close Session").
+    _TOGGLE_TYPES = {"checkbox", "radiobutton", "switch", "togglebutton",
+                     "check box", "toggle button", "radio button", "check menuitem",
+                     "check menu item", "radio menu item", "radiomenuitem"}
+
+    def toggle_element(self, handle, el):
+        """Check/uncheck a real toggle control (checkbox, radio, switch)."""
+        ctype = (el.control_type or "").lower()
+        if ctype not in self._TOGGLE_TYPES:
+            return False
+        ref = el.ref
+        if not ref:
+            return False
+        names = [a.lower() for a in self._atspi_client.action_names(ref)]
+        for name in ("toggle", "press", "click"):
+            if name in names:
+                return self._atspi_client.invoke(ref, name)
+        return False
+
+    def action_names(self, handle, el):
+        return self._atspi_client.action_names(el.ref) if el.ref else []
+
+    def action(self, handle, el, name):
+        return self._atspi_client.invoke(el.ref, name) if el.ref else False
+
+    def get_element_value(self, handle, el):
+        return self._atspi_client.get_value(el.ref) if el.ref else None
+
+    def set_element_value(self, handle, el, value):
+        if not el.ref:
+            return False
+        return self._atspi_client.set_value(el.ref, float(value))
+
+    def select_element(self, handle, el, deselect=False):
+        return self._atspi_client.select(el.ref, deselect) if el.ref else False
+
+    def element_text(self, handle, el, offset=0):
+        return self._atspi_client.text_at(el.ref, offset) if el.ref else ""
+
+    def scroll_element(self, handle, el):
+        return self._atspi_client.scroll_to(el.ref) if el.ref else False
 
     def click_element(self, handle, el, button="left", dbl=False):
         l, t, r, b = el.rect
@@ -247,22 +486,28 @@ class X11Backend(Backend):
         return True
 
     def set_element_text(self, handle, el, text):
-        # Prefer AT-SPI EditableText (no focus/cursor fiddling)
+        """Replace an element's text through AT-SPI EditableText.
+
+        There is deliberately no synthetic-input fallback: on Wayland the click
+        never lands, so ctrl+a / delete / type would go to whatever window has
+        focus. Blind typing is `pctr type`, and it has to be asked for.
+        """
         ref = self._reopen_atspi(handle, el)
-        if ref and self._atspi_client.set_text(ref, text):
-            return
-        l, t, r, b = el.rect
-        self._input.move_to((l + r) // 2, (t + b) // 2)
-        self._input.mouse_down("left")
-        self._input.mouse_up("left")
-        time.sleep(0.05)
-        # Select all and delete
-        self._input.hotkey("ctrl", "a")
-        time.sleep(0.02)
-        self._input.key_down("delete")
-        self._input.key_up("delete")
-        time.sleep(0.02)
-        self._input.write(text, interval=0.01)
+        if ref is None:
+            raise RuntimeError(
+                "element %r (type %s) has no accessible node, so pctr cannot "
+                "tell where text would land -- refusing to type blindly"
+                % (el.name, el.control_type)
+            )
+        if "org.a11y.atspi.EditableText" not in (el.interfaces or ()):
+            raise RuntimeError(
+                "element %r (type %s) is not editable -- it exposes no "
+                "EditableText interface" % (el.name, el.control_type)
+            )
+        if not self._atspi_client.set_text(ref, text):
+            raise RuntimeError(
+                "element %r advertises EditableText but refused the write" % el.name
+            )
 
     def type_element_text(self, handle, el, text, delay=0.0):
         # Focus the element, then APPEND literal text (do not replace).
@@ -281,7 +526,9 @@ class X11Backend(Backend):
         if n in ("serial", "serial-hid", "hid"):
             self._input = SerialHID(port)
         else:
-            # pyautogui/pydirectinput are Windows-only; everything else is XTest
+            # pyautogui/pydirectinput are Windows-only; everything else is XTest.
+            # Fail with pctr's own message, not Xlib's, when there is no X.
+            self._ensure_x()
             self._input = X11Input()
 
     def write_text(self, text, interval=0.0):
@@ -458,6 +705,8 @@ class X11Backend(Backend):
     # --- Virtual desktops ---
 
     def list_desktops(self):
+        if self._ensure_x(silent=True) is None:
+            return ["Desktop 0"]
         try:
             prop = self._root.get_full_property(self._NET_DESKTOP_NAMES, self._UTF8_STRING)
             if prop and prop.value:
@@ -475,10 +724,16 @@ class X11Backend(Backend):
         return ["Desktop 0"]
 
     def get_window_desktop(self, handle):
+        if self._remote_of(handle) is not None:
+            return 0
+        self._ensure_x()
         win = self._display.create_resource_object("window", handle)
         return self._get_window_desktop(win)
 
     def move_window_to_desktop(self, handle, desktop_idx):
+        if self._remote_of(handle) is not None:
+            raise SystemExit("cannot move a Wayland window between desktops (no window handle)")
+        self._ensure_x()
         win = self._display.create_resource_object("window", handle)
         # Send _NET_WM_DESKTOP client message
         from Xlib.protocol import event
@@ -491,6 +746,8 @@ class X11Backend(Backend):
         self._display.sync()
 
     def current_desktop(self):
+        if self._ensure_x(silent=True) is None:
+            return 0
         try:
             prop = self._root.get_full_property(self._NET_CURRENT_DESKTOP, self._X.AnyPropertyType)
             if prop and prop.value:
@@ -501,6 +758,7 @@ class X11Backend(Backend):
 
     def switch_desktop(self, action):
         # Send _NET_CURRENT_DESKTOP client message to root
+        self._ensure_x()
         from Xlib.protocol import event
         if action == "next":
             cur = self.current_desktop()

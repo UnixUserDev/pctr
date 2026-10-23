@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 HANDOFF.local.md
+.env
+.env.*
+*.pem

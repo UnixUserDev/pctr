@@ -1,4 +1,4 @@
-"""pctr MCP server - exposes pctr's Windows UI automation as MCP tools.
+"""pctr MCP server - exposes pctr's element-based UI automation as MCP tools.
 
 Run over stdio (default). Add it to an MCP client (Claude Desktop, Cursor,
 opencode, ...) as:
@@ -32,8 +32,12 @@ server = MCPServer(
         "Element-based UI automation. Find controls by name / control "
         "type / automation id instead of pixel coordinates, then click/type/etc. "
         "Also: OCR (ocr/ocrfind/ocrclick), YOLO-World (look), and virtual desktops "
-        "(desktop). Supports Windows (UIA) and Linux X11 (AT-SPI2). "
-        "Wayland is not yet supported."
+        "(desktop). Supports Windows (UIA) and Linux (AT-SPI2) on both X11 and "
+        "Wayland. On Linux, tree output carries opaque=true when an application "
+        "publishes no accessibility tree (Electron/JVM) -- that is not an empty "
+        "window, and clicking its elements by coordinates will not work. Prefer "
+        "action/value/select over mouse clicks: they go through the accessibility "
+        "API and work on native Wayland windows too."
     ),
 )
 
@@ -81,9 +85,9 @@ def pctr_windows(filter: str | None = None, process: int | None = None) -> str:
     return _run(["windows"] + a)
 
 
-@server.tool(description="Dump the UIA control tree of a window. Provide --title (or process). Optional depth/limit.")
+@server.tool(description="Dump the UIA control tree of a window as JSON (carries opaque/error/backend). Provide --title (or process).")
 def pctr_tree(title: str | None = None, process: int | None = None, depth: int | None = None, limit: int | None = None) -> str:
-    a = ["tree"] + _selectors(title=title, process=process)
+    a = ["tree", "--json"] + _selectors(title=title, process=process)
     if depth is not None:
         a += ["--depth", str(depth)]
     if limit is not None:
@@ -120,6 +124,43 @@ def pctr_set(text: str, title: str | None = None, process: int | None = None, na
     a = ["set"] + _selectors(title=title, process=process, name=name,
                              control_type=control_type, auto_id=auto_id, nth=nth)
     a += ["--text", text]
+    return _run(a)
+
+
+@server.tool(description="List or invoke named element actions (AT-SPI: show menu, press, toggle, expand, ...). Use --list first.")
+def pctr_action(title: str | None = None, process: int | None = None, name: str | None = None,
+                control_type: str | None = None, auto_id: str | None = None, nth: int | None = None,
+                do: str | None = None, list_actions: bool = False, toggle: bool = False) -> str:
+    a = ["action"] + _selectors(title=title, process=process, name=name,
+                                control_type=control_type, auto_id=auto_id, nth=nth)
+    if do:
+        a += ["--do", do]
+    if list_actions:
+        a.append("--list")
+    if toggle:
+        a.append("--toggle")
+    return _run(a)
+
+
+@server.tool(description="Read or set an element's Value (slider, spinner, progress bar).")
+def pctr_value(title: str | None = None, process: int | None = None, name: str | None = None,
+               control_type: str | None = None, auto_id: str | None = None, nth: int | None = None,
+               set_to: float | None = None) -> str:
+    a = ["value"] + _selectors(title=title, process=process, name=name,
+                               control_type=control_type, auto_id=auto_id, nth=nth)
+    if set_to is not None:
+        a += ["--set", str(set_to)]
+    return _run(a)
+
+
+@server.tool(description="Select or deselect a list item, table cell, or tab.")
+def pctr_select(title: str | None = None, process: int | None = None, name: str | None = None,
+                control_type: str | None = None, auto_id: str | None = None, nth: int | None = None,
+                deselect: bool = False) -> str:
+    a = ["select"] + _selectors(title=title, process=process, name=name,
+                                control_type=control_type, auto_id=auto_id, nth=nth)
+    if deselect:
+        a.append("--deselect")
     return _run(a)
 
 
@@ -202,7 +243,7 @@ def main(argv=None):
     import argparse
     ap = argparse.ArgumentParser(
         prog="pctr-mcp",
-        description="pctr MCP server - element-based Windows UI automation over MCP.",
+        description="pctr MCP server - element-based UI automation over MCP.",
     )
     ap.add_argument("--transport", choices=["stdio", "sse", "streamable-http"], default="stdio",
                     help="stdio (default, for MCP clients) or an HTTP transport")

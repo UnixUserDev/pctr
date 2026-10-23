@@ -1,6 +1,6 @@
 ---
 name: pctr
-description: Drive native desktop apps (not browsers) with the pctr CLI - Windows via pywinauto/UIA, Linux X11 via AT-SPI2 - with OCR and YOLO-World fallbacks. Use whenever you must control or inspect a desktop GUI - list windows, dump a control tree, click buttons, type into fields, read on-screen text by OCR, find objects by description, send hotkeys, hold keys, drag, or screenshot an app. Element-based, no pixel hunting. Triggers: pctr, UIA, AT-SPI, UI automation, pywinauto, desktop automation, click a button in an app, type into an app, drive a GUI, control a desktop application, usecomputer.
+description: Drive native desktop apps (not browsers) with the pctr CLI - Windows via pywinauto/UIA, Linux via AT-SPI2 on X11 and Wayland - with OCR and YOLO-World fallbacks. Use whenever you must control or inspect a desktop GUI - list windows, dump a control tree, click buttons, type into fields, read on-screen text by OCR, find objects by description, send hotkeys, hold keys, drag, or screenshot an app. Element-based, no pixel hunting. Triggers: pctr, UIA, AT-SPI, UI automation, pywinauto, desktop automation, click a button in an app, type into an app, drive a GUI, control a desktop application, usecomputer.
 ---
 
 # pctr - desktop control
@@ -8,9 +8,16 @@ description: Drive native desktop apps (not browsers) with the pctr CLI - Window
 **PCTR — Personal Computer Tactile Response.** Element-based automation.
 Find a control by its name / control type / automation id and act on it, so
 window moves, DPI, and layout changes don't break you. Windows uses UI
-Automation (`pywinauto` + `uiautomation`); Linux X11 uses AT-SPI2 (accessibility
-D-Bus) + XTest. Pick the platform with `--backend auto|windows|x11|wayland`
-(`auto` is correct almost always).
+Automation (`pywinauto` + `uiautomation`); Linux uses AT-SPI2 (accessibility
+D-Bus) on both X11 and Wayland, plus XTest where an X display exists. Pick the
+platform with `--backend auto|windows|x11|wayland` (`auto` is correct almost
+always).
+
+On Linux, act through the accessibility API when you can: `action` / `value` /
+`select` reach native Wayland windows, while synthetic mouse clicks only reach
+XWayland clients. If `tree --json` says `"opaque": true`, the app publishes no
+widgets at all - stop hunting for element names and fall back to `ocr`,
+`look`, or a keyboard shortcut.
 
 ## Three ways to find a target
 
@@ -40,6 +47,11 @@ back as `--name`, `--control-type`, `--auto-id`.
 | `find --title RE [--name RE] [--limit N] [--nth N]` | List matching elements. |
 | `click --title RE --name RE [--method auto\|invoke\|mouse] [--dbl]` | Click an element. |
 | `set --title RE --name RE --text S` | Set a field via the UIA ValuePattern (exact, instant). |
+| `action --title RE --name RE --list` / `--do NAME` / `--toggle` | Named AT-SPI actions (Linux): show menu, press, expand, toggle. |
+| `value --title RE --name RE [--set N]` | Read/set a slider, spinner, or progress value (Linux). |
+| `select --title RE --name RE [--deselect]` | Select a list item, table cell, or tab (Linux). |
+| `text --title RE --name RE [--offset N]` | Read text at an offset (Linux). |
+| `scroll --title RE --name RE` | Scroll an element into view (Linux). |
 | `type [--title RE --name RE] --text S [--delay 0.03] [--chunk 1]` | Send keystrokes (see caveats). |
 | `keys --keys "{ENTER}"` | Global combo via pywinauto send_keys syntax. |
 | `hotkey --keys ctrl+s` | Modifier combo (prefer this over `keys "^s"`). |
